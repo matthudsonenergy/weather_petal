@@ -6,7 +6,7 @@ This repository provides a ready-to-run Python workflow for:
 - Fetching historical weather data from Open-Meteo Archive API
 - Transforming API response into Pandas DataFrames
 - Exporting CSV outputs
-- Plotting selected weather metrics with Matplotlib
+- Plotting selected weather metrics with Matplotlib (temperature in F)
 
 ## Project Layout
 
@@ -64,6 +64,8 @@ python weather_historical.py \
 - `--output-dir`: Output folder path (default: `output`)
 - `--timeout`: HTTP timeout in seconds (default: `30`)
 
+Temperature values are requested in Fahrenheit by default.
+
 ## Supported Metrics
 
 ### Hourly
@@ -95,11 +97,22 @@ python weather_historical.py \
 
 ## Output
 
-The script creates the output directory (if missing) and writes:
+Each run creates a new subfolder under `--output-dir` to avoid overwriting previous results.
+
+Folder pattern:
+
+`<location_slug>_<start-date>_to_<end-date>_<YYYYMMDD_HHMMSS>`
+
+Example:
+
+`output/new_york_us_2024-02-01_to_2024-02-07_20260219_150530/`
+
+Inside that run folder, the script writes:
 
 - `hourly_weather.csv` when hourly metrics are requested
 - `daily_weather.csv` when daily metrics are requested
 - `hourly_weather.png` when hourly metrics are requested
+- `below_freezing_weather.png` when hourly Fahrenheit metrics include values at or below 32°F (2 subplots: below-freezing temperature line + consecutive-hour streak bars)
 - `daily_weather.png` when daily metrics are requested
 
 ## Error Handling

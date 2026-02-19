@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
@@ -43,9 +44,37 @@ SUPPORTED_DAILY_METRICS = {
     "wind_speed_10m_max",
 }
 
+FAHRENHEIT_METRICS = {
+    "temperature_2m",
+    "apparent_temperature",
+    "temperature_2m_max",
+    "temperature_2m_min",
+    "temperature_2m_mean",
+    "apparent_temperature_max",
+    "apparent_temperature_min",
+}
+
 
 class WeatherClientError(Exception):
     """Application-level exception for predictable user-facing failures."""
+
+
+def metric_label(metric: str) -> str:
+    if metric == "temperature_2m":
+        return "Temperature"
+    return metric
+
+
+def slugify(value: str) -> str:
+    normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in value.strip())
+    compact = "_".join(part for part in normalized.split("_") if part)
+    return compact or "location"
+
+
+def build_run_output_dir(base_output_dir: Path, location: str, start_date: str, end_date: str) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    folder_name = f"{slugify(location)}_{start_date}_to_{end_date}_{timestamp}"
+    return base_output_dir / folder_name
 
 
 def parse_args() -> argparse.Namespace:
@@ -116,29 +145,60 @@ def normalize_metrics(metrics_csv: str) -> Tuple[List[str], List[str]]:
 
 
 def geocode_location(location: str, timeout: int) -> Tuple[float, float, str]:
-    params = {"name": location, "count": 1, "language": "en", "format": "json"}
-    try:
-        response = requests.get(GEOCODING_URL, params=params, timeout=timeout)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise WeatherClientError(f"Failed to geocode location '{location}': {exc}") from exc
+    def extract_result(payload: Dict) -> Tuple[float, float, str] | None:
+        results = payload.get("results")
+        if not results:
+            return None
 
-    data = response.json()
-    results = data.get("results")
-    if not results:
-        raise WeatherClientError(f"No geocoding results found for '{location}'.")
+        hit = results[0]
+        lat = hit.get("latitude")
+        lon = hit.get("longitude")
+        if lat is None or lon is None:
+            return None
 
-    hit = results[0]
-    lat = hit.get("latitude")
-    lon = hit.get("longitude")
-    name = hit.get("name", location)
-    country = hit.get("country", "")
-    label = f"{name}, {country}".strip(", ")
+        name = hit.get("name", location)
+        country = hit.get("country", "")
+        label = f"{name}, {country}".strip(", ")
+        return float(lat), float(lon), label
 
-    if lat is None or lon is None:
-        raise WeatherClientError(f"Invalid geocoding response for '{location}'.")
+    parts = [part.strip() for part in location.split(",") if part.strip()]
+    city_hint = parts[0] if parts else location.strip()
+    country_hint = parts[1].upper() if len(parts) > 1 and len(parts[1]) == 2 else None
 
-    return float(lat), float(lon), label
+    attempts: List[Dict[str, str | int]] = [
+        {"name": location, "count": 1, "language": "en", "format": "json"},
+    ]
+    if city_hint and city_hint != location:
+        attempts.append({"name": city_hint, "count": 1, "language": "en", "format": "json"})
+    if country_hint:
+        attempts.append(
+            {
+                "name": city_hint,
+                "count": 1,
+                "language": "en",
+                "format": "json",
+                "countryCode": country_hint,
+            }
+        )
+
+    last_request_error: requests.RequestException | None = None
+    for params in attempts:
+        try:
+            response = requests.get(GEOCODING_URL, params=params, timeout=timeout)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            last_request_error = exc
+            continue
+
+        resolved = extract_result(response.json())
+        if resolved is not None:
+            return resolved
+
+    if last_request_error is not None:
+        raise WeatherClientError(f"Failed to geocode location '{location}': {last_request_error}") from last_request_error
+    raise WeatherClientError(
+        f"No geocoding results found for '{location}'. Try formats like 'New York' or 'New York, US'."
+    )
 
 
 def fetch_archive_data(
@@ -157,6 +217,7 @@ def fetch_archive_data(
         "start_date": start_date,
         "end_date": end_date,
         "timezone": timezone,
+        "temperature_unit": "fahrenheit",
     }
     if hourly_metrics:
         params["hourly"] = ",".join(hourly_metrics)
@@ -217,15 +278,95 @@ def plot_frame(frame: pd.DataFrame, metrics: Sequence[str], title: str, image_pa
 
     for idx, metric in enumerate(metrics):
         axis = axes[idx]
+        label = metric_label(metric)
         axis.plot(frame["time"], frame[metric], linewidth=1.6)
-        axis.set_ylabel(metric)
+        if metric in FAHRENHEIT_METRICS:
+            axis.set_ylabel(f"{label} (°F)")
+        else:
+            axis.set_ylabel(label)
         axis.grid(alpha=0.25)
-        axis.set_title(metric)
+        axis.set_title(label)
 
     fig.suptitle(title, fontsize=13)
     fig.tight_layout()
     fig.savefig(image_path, dpi=140)
     plt.close(fig)
+
+
+def plot_below_freezing_frame(
+    frame: pd.DataFrame,
+    metrics: Sequence[str],
+    title: str,
+    image_path: Path,
+    freezing_point_f: float = 32.0,
+) -> bool:
+    freezing_metrics = [metric for metric in metrics if metric in FAHRENHEIT_METRICS and metric in frame.columns]
+    if not freezing_metrics:
+        return False
+
+    primary_metric = "temperature_2m" if "temperature_2m" in frame.columns else freezing_metrics[0]
+    subfreezing_series = frame[primary_metric].where(frame[primary_metric] <= freezing_point_f)
+    subfreezing = subfreezing_series.notna()
+    if not subfreezing.any():
+        return False
+
+    streak_starts: List[pd.Timestamp] = []
+    streak_lengths: List[int] = []
+    current_start: pd.Timestamp | None = None
+    current_length = 0
+    previous_time: pd.Timestamp | None = None
+
+    for timestamp, is_subfreezing in zip(frame["time"], subfreezing):
+        if is_subfreezing:
+            is_continuation = (
+                previous_time is not None
+                and pd.notna(previous_time)
+                and pd.notna(timestamp)
+                and timestamp - previous_time == pd.Timedelta(hours=1)
+                and current_start is not None
+            )
+            if not is_continuation:
+                if current_start is not None and current_length > 0:
+                    streak_starts.append(current_start)
+                    streak_lengths.append(current_length)
+                current_start = timestamp
+                current_length = 1
+            else:
+                current_length += 1
+        else:
+            if current_start is not None and current_length > 0:
+                streak_starts.append(current_start)
+                streak_lengths.append(current_length)
+            current_start = None
+            current_length = 0
+        previous_time = timestamp
+
+    if current_start is not None and current_length > 0:
+        streak_starts.append(current_start)
+        streak_lengths.append(current_length)
+
+    if not streak_starts:
+        return False
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    temp_axis, streak_axis = axes
+    primary_label = metric_label(primary_metric)
+    temp_axis.plot(frame["time"], subfreezing_series, linewidth=1.8)
+    temp_axis.set_ylabel(f"{primary_label} (°F)")
+    temp_axis.set_title(f"{primary_label} (below freezing only)")
+    temp_axis.grid(alpha=0.25)
+
+    streak_axis.bar(streak_starts, streak_lengths, width=pd.Timedelta(hours=8))
+    streak_axis.set_ylabel("Consecutive hours")
+    streak_axis.set_xlabel("Streak start time")
+    streak_axis.set_title(f"{primary_label} consecutive below-freezing streaks")
+    streak_axis.grid(alpha=0.25, axis="y")
+
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    fig.savefig(image_path, dpi=140)
+    plt.close(fig)
+    return True
 
 
 def main() -> int:
@@ -246,7 +387,13 @@ def main() -> int:
     )
 
     frames = build_dataframes(payload, hourly_metrics=hourly_metrics, daily_metrics=daily_metrics)
-    output_dir = Path(args.output_dir)
+    output_root = Path(args.output_dir)
+    output_dir = build_run_output_dir(
+        base_output_dir=output_root,
+        location=resolved_location,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
     save_dataframes(frames, output_dir)
 
     if hourly_metrics:
@@ -262,6 +409,13 @@ def main() -> int:
             metrics=daily_metrics,
             title=f"Daily weather metrics for {resolved_location}",
             image_path=output_dir / "daily_weather.png",
+        )
+    if hourly_metrics:
+        plot_below_freezing_frame(
+            frame=frames["hourly"],
+            metrics=hourly_metrics,
+            title=f"Below-freezing hourly metrics for {resolved_location}",
+            image_path=output_dir / "below_freezing_weather.png",
         )
 
     print("Completed successfully.")
