@@ -4,7 +4,7 @@ const HUGGINGFACE_OPENAI_COMPAT_CHAT_COMPLETIONS_URL = "https://router.huggingfa
 
 const CONFIG = {
   zipCode: "39465",
-  recipientEmail: "you@yourdomain.com",
+  recipientEmail: "matthew.hudson@maatenergy.com",
   timezone: "America/Chicago",
   hourlyMetrics: [
     "temperature_2m",
@@ -18,8 +18,8 @@ const CONFIG = {
   windSpeedUnit: "mph",
   precipitationUnit: "inch",
   triggerHourLocal: 6,
-  enableLlmSummary: false,
-  hfModel: "mistralai/Mistral-7B-Instruct-v0.3",
+  enableLlmSummary: true,
+  hfModel: "meta-llama/Llama-3.2-3B-Instruct",
   hfTokenPropertyName: "HF_TOKEN",
   llmMaxRows: 240
 };
@@ -38,10 +38,12 @@ function sendTenDayHourlyForecastEmail() {
   const fileName = "hourly_forecast_" + dateRange.startDate + "_to_" + dateRange.endDate + ".csv";
   const attachments = [Utilities.newBlob(csv, "text/csv", fileName)];
   let llmSummaryText = "";
+  let llmSummaryForEmail = "";
   if (CONFIG.enableLlmSummary) {
     llmSummaryText = generateExtremeWeatherSummary_(forecast, geocoding, dateRange);
-    const summaryFileName = "llm_extreme_weather_summary_" + dateRange.startDate + "_to_" + dateRange.endDate + ".md";
-    attachments.push(Utilities.newBlob(llmSummaryText + "\n", "text/markdown", summaryFileName));
+    llmSummaryForEmail = sanitizeLlmSummaryForEmail_(llmSummaryText);
+    const summaryFileName = "llm_extreme_weather_summary_" + dateRange.startDate + "_to_" + dateRange.endDate + ".txt";
+    attachments.push(Utilities.newBlob(llmSummaryForEmail + "\n", "text/plain", summaryFileName));
   }
 
   const subject = "10-day hourly forecast: " + geocoding.label + " (" + dateRange.startDate + ")";
@@ -51,8 +53,8 @@ function sendTenDayHourlyForecastEmail() {
     "Range: " + dateRange.startDate + " to " + dateRange.endDate + "\n" +
     "Metrics: " + CONFIG.hourlyMetrics.join(", ") + "\n\n" +
     "Attached: CSV with hourly forecast data from Open-Meteo.";
-  if (llmSummaryText) {
-    body += "\n\nLLM Extreme Weather Summary\n" + llmSummaryText;
+  if (llmSummaryForEmail) {
+    body += "\n\nWeather Newsletter\n" + llmSummaryForEmail;
   }
 
   GmailApp.sendEmail(CONFIG.recipientEmail, subject, body, {
@@ -172,8 +174,10 @@ function generateExtremeWeatherSummary_(forecastPayload, geocoding, dateRange) {
         {
           role: "system",
           content:
-            "You are a meteorological analyst. Focus on extreme weather patterns and anomalies. " +
-            "Do not invent values. If confidence is limited, state uncertainty explicitly."
+            "You are a meteorological analyst writing a local weather newsletter. " +
+            "Use plain text only and never use markdown characters for formatting. " +
+            "Focus on notable weather patterns and anomalies. Do not invent values. " +
+            "If confidence is limited, state uncertainty explicitly."
         },
         { role: "user", content: prompt }
       ],
@@ -213,8 +217,12 @@ function buildLlmPromptFromForecast_(forecastPayload, locationLabel, dateRange, 
     "Location: " + locationLabel,
     "Date range: " + dateRange.startDate + " to " + dateRange.endDate,
     "Task: Identify notable and potentially extreme weather events from the CSV data.",
-    "Return a concise report with sections: Executive Summary, Extreme Events, Risk Notes, and Follow-up Checks.",
-    "Use concrete timestamps and values whenever possible.",
+    "Temperature data in this CSV is in degrees Fahrenheit (F). Do not convert temperature values to Celsius.",
+    "Units: temperature_2m=F, apparent_temperature=F, relative_humidity_2m=%, precipitation=inch, wind_speed_10m=mph, cloud_cover=%.",
+    "Write an engaging plain-text newsletter for local readers.",
+    "Return sections titled exactly: Summary:, Notable Weather Moments:, Impacts and Risks:, and What to Watch Next:.",
+    "Do not use markdown. Do not use #, *, **, or bullet syntax.",
+    "Use concrete timestamps in AM/PM format and values whenever possible.",
     "",
     summarizeForecastExtremes_(hourly, CONFIG.hourlyMetrics),
     "",
@@ -259,16 +267,55 @@ function summarizeForecastExtremes_(hourly, metrics) {
       "- " +
         metric +
         ": min=" +
-        minVal.toFixed(2) +
+        formatValueWithUnit_(metric, minVal) +
         " at " +
         minTime +
         ", max=" +
-        maxVal.toFixed(2) +
+        formatValueWithUnit_(metric, maxVal) +
         " at " +
         maxTime
     );
   }
   return parts.join("\n");
+}
+
+function formatValueWithUnit_(metric, value) {
+  const unit = getMetricUnit_(metric);
+  if (!isFinite(value)) {
+    return String(value);
+  }
+  return value.toFixed(2) + (unit ? " " + unit : "");
+}
+
+function getMetricUnit_(metric) {
+  if (metric === "temperature_2m" || metric === "apparent_temperature") {
+    return "F";
+  }
+  if (metric === "relative_humidity_2m" || metric === "cloud_cover") {
+    return "%";
+  }
+  if (metric === "precipitation") {
+    return "inch";
+  }
+  if (metric === "wind_speed_10m") {
+    return "mph";
+  }
+  return "";
+}
+
+function sanitizeLlmSummaryForEmail_(text) {
+  if (!text) {
+    return "";
+  }
+  let normalized = String(text).replace(/\r/g, "");
+  normalized = normalized.replace(/```/g, "");
+  normalized = normalized.replace(/^#{1,6}\s+/gm, "");
+  normalized = normalized.replace(/\*\*(.*?)\*\*/g, "$1");
+  normalized = normalized.replace(/\*(.*?)\*/g, "$1");
+  normalized = normalized.replace(/^\s*[-*+]\s+/gm, "- ");
+  normalized = normalized.replace(/^\s*\d+\.\s+/gm, "- ");
+  normalized = normalized.replace(/\n{3,}/g, "\n\n");
+  return normalized.trim();
 }
 
 function buildHourlyCsvFromSeries_(hourly, metrics, maxRows) {
