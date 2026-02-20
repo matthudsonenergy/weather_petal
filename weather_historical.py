@@ -15,6 +15,7 @@ import requests
 
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
 # Frequently used metrics from the Open-Meteo API.
 SUPPORTED_HOURLY_METRICS = {
@@ -201,7 +202,13 @@ def geocode_location(location: str, timeout: int) -> Tuple[float, float, str]:
     )
 
 
-def fetch_archive_data(
+def choose_weather_api_url(start_date: str) -> str:
+    start = pd.to_datetime(start_date, format="%Y-%m-%d")
+    today = pd.Timestamp.now().normalize()
+    return FORECAST_URL if start >= today else ARCHIVE_URL
+
+
+def fetch_weather_data(
     latitude: float,
     longitude: float,
     start_date: str,
@@ -211,6 +218,7 @@ def fetch_archive_data(
     daily_metrics: Sequence[str],
     timeout: int,
 ) -> Dict:
+    weather_api_url = choose_weather_api_url(start_date=start_date)
     params: Dict[str, str | float] = {
         "latitude": latitude,
         "longitude": longitude,
@@ -225,14 +233,14 @@ def fetch_archive_data(
         params["daily"] = ",".join(daily_metrics)
 
     try:
-        response = requests.get(ARCHIVE_URL, params=params, timeout=timeout)
+        response = requests.get(weather_api_url, params=params, timeout=timeout)
         response.raise_for_status()
     except requests.RequestException as exc:
-        raise WeatherClientError(f"Failed to fetch archive weather data: {exc}") from exc
+        raise WeatherClientError(f"Failed to fetch weather data: {exc}") from exc
 
     payload = response.json()
     if "hourly" not in payload and "daily" not in payload:
-        raise WeatherClientError("Archive response does not contain hourly or daily weather data.")
+        raise WeatherClientError("Weather response does not contain hourly or daily weather data.")
     return payload
 
 
@@ -375,7 +383,7 @@ def main() -> int:
     hourly_metrics, daily_metrics = normalize_metrics(args.metrics)
 
     latitude, longitude, resolved_location = geocode_location(args.location, timeout=args.timeout)
-    payload = fetch_archive_data(
+    payload = fetch_weather_data(
         latitude=latitude,
         longitude=longitude,
         start_date=args.start_date,

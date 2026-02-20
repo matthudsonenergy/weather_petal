@@ -13,6 +13,9 @@ This repository provides a ready-to-run Python workflow for:
 ```text
 weather_petal/
 ├── weather_historical.py
+├── google_apps_script/
+│   ├── ten_day_hourly_forecast.gs
+│   └── README.md
 ├── requirements.txt
 └── README.md
 ```
@@ -133,6 +136,13 @@ On failure, an error message is printed to stderr and the script exits with code
 - Open-Meteo is free and does not require an API key for this use case.
 - If requests fail, verify network connectivity and rerun with a larger timeout, e.g. `--timeout 60`.
 - Use a narrow date range first to validate your metric selection and output format.
+
+## Daily Forecast Email (Google Workspace)
+
+If you want a 10-day hourly forecast emailed daily, use the Google Apps Script version in:
+
+- `google_apps_script/ten_day_hourly_forecast.gs`
+- `google_apps_script/README.md`
 
 ## Example: Quick Test
 
